@@ -1,7 +1,9 @@
-# 统一换行符，避免 Windows 协作者把 CRLF 带进仓库
+# Normalise line endings so Windows contributors cannot introduce CRLF into the repo.
+# 统一换行符，避免 Windows 协作者把 CRLF 带进仓库。
 * text=auto eol=lf
 
-# 二进制资源不参与文本转换
+# Binary assets never take part in text conversion.
+# 二进制资源不参与文本转换。
 *.png binary
 *.jpg binary
 *.ico binary

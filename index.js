@@ -1,22 +1,48 @@
 /**
- * dsh-system-net — 让 DeepSeek Harness 跟随系统网络设置（代理 + 证书）。
+ * dsh-system-net — make DeepSeek Harness follow your system network settings
+ * (proxy + certificates).
  *
- * 解决两个**互相独立**的问题：
+ * 让 DeepSeek Harness 跟随系统网络设置（代理 + 证书）。
  *
- *  ① 走不走代理 —— Node 不读 Windows/macOS 的"系统代理"，只认 http_proxy/https_proxy
- *     环境变量。官方要求在**启动前**设好，插件帮你在运行时补上。
+ * It closes two **independent** gaps:
  *
- *  ② 信不信证书 —— 加速器 / 企业代理解密 HTTPS 后用自签 CA 重签。浏览器能用是因为它读
- *     系统证书库，而 Node 默认不读，于是报 UNABLE_TO_VERIFY_LEAF_SIGNATURE。官方要求在
- *     启动前设 NODE_EXTRA_CA_CERTS 或 NODE_OPTIONS=--use-system-ca，插件在运行时补上。
+ *  ① Routing — Node does not read the Windows/macOS "system proxy"; it only
+ *     honours the http_proxy/https_proxy environment variables. The official
+ *     guidance is to export them *before* startup; this plugin does it at runtime.
  *
- * 两件事都通过**官方提供的运行时入口**完成，因此与宿主永远一致：
- *  - 代理：{@link installProxyFromEnvironment}，它会同时更新全局 dispatcher **和**
- *    `proxyRouteFor()` 读取的策略，所以 web_search / web_fetch 也会正确走代理；只换
- *    dispatcher 的插件做不到这一点。
- *  - 证书：`tls.setDefaultCACertificates`（Node 22.19+ / 24.5+）。
+ *     ① 走不走代理 —— Node 不读 Windows/macOS 的"系统代理"，只认
+ *     http_proxy/https_proxy 环境变量。官方要求在启动前设好，插件在运行时补上。
  *
- * 本插件不修改任何用户配置文件，所有改动都发生在当前进程内存里，进程退出即消失。
+ *  ② Trust — accelerators and corporate proxies decrypt HTTPS and re-sign it
+ *     with their own self-signed CA. Browsers work because they read the OS
+ *     certificate store; Node does not, so it raises
+ *     UNABLE_TO_VERIFY_LEAF_SIGNATURE. The official guidance is
+ *     NODE_EXTRA_CA_CERTS or NODE_OPTIONS=--use-system-ca before startup;
+ *     this plugin does it at runtime.
+ *
+ *     ② 信不信证书 —— 加速器/企业代理解密 HTTPS 后用自签 CA 重签。浏览器能用
+ *     是因为它读系统证书库，而 Node 默认不读，于是报 UNABLE_TO_VERIFY_LEAF_SIGNATURE。
+ *     官方要求在启动前设 NODE_EXTRA_CA_CERTS 或 NODE_OPTIONS=--use-system-ca。
+ *
+ * Both are done through **official runtime entry points**, so this plugin can
+ * never disagree with the host:
+ *
+ *  - Proxy: {@link installProxyFromEnvironment}. It updates the global
+ *    dispatcher *and* the policy read by `proxyRouteFor()` in one step, which is
+ *    why web_search / web_fetch route correctly too. A plugin that only swaps
+ *    the dispatcher cannot achieve this.
+ *  - Certificates: `tls.setDefaultCACertificates` (Node 22.19+ / 24.5+).
+ *
+ * 两件事都通过官方运行时入口完成，因此与宿主永远一致：
+ *  - 代理：installProxyFromEnvironment 会同时更新全局 dispatcher 与
+ *    proxyRouteFor() 读取的策略，所以 web_search / web_fetch 也正确走代理；
+ *    只换 dispatcher 的插件做不到这一点。
+ *  - 证书：tls.setDefaultCACertificates（Node 22.19+ / 24.5+）。
+ *
+ * This plugin modifies no user configuration file. Every change lives in the
+ * current process's memory and disappears when the process exits.
+ *
+ * 本插件不修改任何用户配置文件；所有改动都在当前进程内存里，进程退出即消失。
  *
  * @module dsh-system-net
  */
@@ -30,10 +56,10 @@ import Schema from '@deepseek-ai/schemastery';
 
 export const name = 'system-net';
 
-/** 版本无关的兜底：这些是常见代理软件的本地端口。 */
+/** Version-independent fallback: common local ports used by proxy software. 常见代理软件的本地端口。 */
 const DEFAULT_PROBE_PORTS = [7890, 7897, 10808, 10809, 1080, 2080, 8888, 8080, 26561];
 
-/** 插件加载后留下的可观测状态，供自检与诊断使用。 */
+/** Observable state left by the plugin, for self-check and diagnosis. 插件加载后留下的可观测状态。 */
 export const state = {
   cert: { installed: false, reason: null, defaultCount: null, systemCount: null, mergedCount: null, extraCount: null },
   proxy: { installed: false, reason: null, mode: null, url: null, source: null, noProxy: null, probed: [] },
@@ -44,60 +70,71 @@ export const state = {
 export const Config = Schema.object({
   enabled: Schema.boolean().default(true),
 
-  // ---- 代理 ----
+  // ---- Proxy 代理 ----
   /**
+   * auto   — honour an existing proxy environment; otherwise read the system
+   *          proxy, then probe common local ports.
+   * manual — use proxyUrl only.
+   * off    — never touch the proxy.
+   *
    * auto   — 环境里已有代理变量则尊重它；否则读系统代理、再探测常见端口。
    * manual — 只使用 proxyUrl。
    * off    — 不碰代理。
    */
   proxyMode: Schema.union(['auto', 'manual', 'off']).default('auto'),
-  /** manual 模式使用的代理地址，例如 http://127.0.0.1:7890。 */
+  /** Proxy URL for manual mode, e.g. http://127.0.0.1:7890. manual 模式使用的代理地址。 */
   proxyUrl: Schema.string().default(''),
-  /** auto 模式要探测的本地端口。 */
+  /** Local ports probed in auto mode. auto 模式要探测的本地端口。 */
   probePorts: Schema.array(Schema.number()).default(DEFAULT_PROBE_PORTS),
-  /** 探测时每个端口的超时。 */
+  /** Per-port probe timeout. 探测时每个端口的超时。 */
   probeTimeoutMs: Schema.number().default(600),
   /**
+   * In auto mode, retry at an interval when no proxy was found at startup.
+   * This rescues the common ordering "start DSH first, turn on the accelerator later".
+   *
    * auto 模式下若首次未检测到代理，则按间隔重试。
    * 用于救"先启动 DSH、之后才打开加速器"这一常见顺序。
    */
   watchProxy: Schema.boolean().default(true),
-  /** 重试间隔（毫秒）。 */
+  /** Retry interval in milliseconds. 重试间隔（毫秒）。 */
   watchIntervalMs: Schema.number().default(10000),
-  /** 额外追加到 NO_PROXY 的条目（逗号分隔）。loopback 由官方库自动保证。 */
+  /** Extra NO_PROXY entries (comma separated). loopback is guaranteed by the official library. 额外追加到 NO_PROXY 的条目；loopback 由官方库自动保证。 */
   noProxy: Schema.string().default(''),
 
-  // ---- 证书 ----
-  /** 并入操作系统证书库。 */
+  // ---- Certificates 证书 ----
+  /** Merge the operating system certificate store. 并入操作系统证书库。 */
   includeSystem: Schema.boolean().default(true),
-  /** 保留 Node 自带的 Mozilla 根证书集合（应当保持开启）。 */
+  /** Keep Node's bundled Mozilla root set (should stay enabled). 保留 Node 自带的 Mozilla 根证书集合（应当保持开启）。 */
   includeDefault: Schema.boolean().default(true),
-  /** 额外要信任的 PEM 文件路径。 */
+  /** Extra PEM files to trust. 额外要信任的 PEM 文件路径。 */
   extraCaFiles: Schema.array(Schema.string()).default([]),
 
-  // ---- 公共 ----
+  // ---- Shared 公共 ----
   /**
+   * Write the effective state to this JSON file so users and agents can verify it.
+   * Empty string means the default: $DSH_HOME/system-net-status.json.
+   *
    * 把生效状态写入这个 JSON 文件，便于用户与 agent 核验。
    * 空字符串表示默认位置：$DSH_HOME/system-net-status.json。
    */
   statusFile: Schema.string().default(''),
-  /** 加载后做一次真实 TLS 请求，验证整条链路。 */
+  /** Perform one real TLS request after loading to verify the whole chain. 加载后做一次真实 TLS 请求，验证整条链路。 */
   selfCheck: Schema.boolean().default(true),
   selfCheckUrl: Schema.string().default('https://api.github.com/rate_limit'),
   selfCheckTimeoutMs: Schema.number().default(15000),
 });
 
 // ─────────────────────────────────────────────────────────────
-// 证书
+// Certificates 证书
 // ─────────────────────────────────────────────────────────────
 
-/** 运行时 API 是否可用。 */
+/** Whether the runtime APIs are available. 运行时 API 是否可用。 */
 function caApiAvailable() {
   return typeof tls.getCACertificates === 'function'
     && typeof tls.setDefaultCACertificates === 'function';
 }
 
-/** 读系统证书库；平台或版本不支持时降级为"没有"。 */
+/** Read the OS certificate store; degrade to "none" on unsupported platforms or versions. 读系统证书库；平台或版本不支持时降级为"没有"。 */
 function readSystemCertificates() {
   try {
     const list = tls.getCACertificates('system');
@@ -107,7 +144,7 @@ function readSystemCertificates() {
   }
 }
 
-/** 读 Node 自带的默认根证书集合。 */
+/** Read Node's bundled default root set. 读 Node 自带的默认根证书集合。 */
 function readDefaultCertificates() {
   try {
     const list = tls.getCACertificates('default');
@@ -118,9 +155,11 @@ function readDefaultCertificates() {
 }
 
 /**
+ * Read extra PEM files; failures are recorded, never thrown.
  * 读取额外的 PEM 文件，失败只记录不抛出。
- * @param {string[]} files 文件路径
- * @returns {Promise<{loaded: string[], failed: string[]}>} 结果
+ *
+ * @param {string[]} files File paths. 文件路径。
+ * @returns {Promise<{loaded: string[], failed: string[]}>} Result 结果。
  */
 async function readExtraCaFiles(files) {
   const loaded = [];
@@ -139,9 +178,11 @@ async function readExtraCaFiles(files) {
 }
 
 /**
+ * Merge the OS certificate store into this process's default TLS trust chain.
  * 把系统证书库并入进程的默认 TLS 信任链。
- * @param {object} config 插件配置
- * @returns {Promise<{ok: boolean, reason?: string}>} 结果
+ *
+ * @param {object} config Plugin config. 插件配置。
+ * @returns {Promise<{ok: boolean, reason?: string}>} Result 结果。
  */
 export async function installTrust(config) {
   const cert = state.cert;
@@ -157,6 +198,7 @@ export async function installTrust(config) {
 
   const defaults = config.includeDefault ? readDefaultCertificates() : [];
   const system = config.includeSystem ? readSystemCertificates() : [];
+
   const { loaded, failed } = await readExtraCaFiles(config.extraCaFiles);
 
   cert.defaultCount = defaults.length;
@@ -169,6 +211,7 @@ export async function installTrust(config) {
     return { ok: false, reason: cert.reason };
   }
 
+  // Per the official docs this function de-duplicates, so repeat calls are idempotent.
   // 官方文档：该函数会先对证书去重，因此重复调用是幂等的。
   tls.setDefaultCACertificates(parts);
   cert.mergedCount = readDefaultCertificates().length;
@@ -178,17 +221,23 @@ export async function installTrust(config) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 代理
+// Proxy 代理
 // ─────────────────────────────────────────────────────────────
 
 /**
- * 读 Windows 的 Internet Settings，判定加速器用的是哪种模式。
+ * Read Windows' Internet Settings and decide which mode the accelerator uses.
  *
- * 这一步同时承担**条件检测**：本插件只适用于「系统代理」模式，因此必须把 PAC 和
+ * This doubles as **condition detection**: the plugin only applies to
+ * "system proxy" mode, so PAC and "nothing configured" must be told apart to
+ * produce an accurate message instead of failing silently.
+ *
+ * 读 Windows 的 Internet Settings，判定加速器用的是哪种模式。
+ * 这一步同时承担条件检测：本插件只适用于「系统代理」模式，因此必须把 PAC 和
  * "什么都没设"区分出来，好给出准确提醒，而不是静默失败。
  *
  * @returns {Promise<{mode: 'system-proxy'|'pac'|'none', server: string|null,
- *   override: string, pacUrl: string|null}>} 判定结果（非 Windows 一律 none）
+ *   override: string, pacUrl: string|null}>} Detection result; non-Windows is always `none`.
+ *   判定结果（非 Windows 一律 none）。
  */
 async function readWindowsSystemProxy() {
   const none = { mode: 'none', server: null, override: '', pacUrl: null };
@@ -210,16 +259,20 @@ async function readWindowsSystemProxy() {
   if ((enabled === '0x1' || enabled === '1') && server) {
     return { mode: 'system-proxy', server, override: override ?? '', pacUrl: pacUrl ?? null };
   }
+  // No static proxy but a PAC is set: this plugin does not parse PAC, and the user must be told.
   // 没有静态代理但有 PAC：本插件不解析 PAC，必须让用户知道。
   if (pacUrl) return { mode: 'pac', server: null, override: '', pacUrl };
   return none;
 }
 
 /**
- * Windows 的 ProxyServer 允许 `http=host:port;https=host:port` 这种多协议写法。
- * 这里只取 http/https 那一项，并补上 scheme。
- * @param {string} server 注册表里的原始值
- * @returns {string|null} 形如 http://127.0.0.1:7890 的地址
+ * Windows' ProxyServer allows `http=host:port;https=host:port`. Take the
+ * http/https entry and add a scheme.
+ *
+ * Windows 的 ProxyServer 允许多协议写法，这里只取 http/https 那一项并补上 scheme。
+ *
+ * @param {string} server Raw registry value. 注册表里的原始值。
+ * @returns {string|null} An address like http://127.0.0.1:7890. 形如 http://127.0.0.1:7890 的地址。
  */
 export function normalizeProxyServer(server) {
   if (!server) return null;
@@ -237,17 +290,22 @@ export function normalizeProxyServer(server) {
 }
 
 /**
- * 把 Windows 的 ProxyOverride 转成 NO_PROXY 条目。
+ * Turn Windows' ProxyOverride into NO_PROXY entries.
  *
- * 注册表用 `;` 分隔，且常含本库无法忠实翻译的写法：
- *  - `<local>`  —— Windows 的"本地地址"，而 loopback 由官方库无条件保证
- *  - `10.*` 等  —— Windows 前缀通配，官方匹配器只做后缀匹配，翻译过去是惰性的
- *  - `10.0.0.0/8` —— CIDR，官方明确不匹配
- *  - `*`       —— **必须丢弃**：官方匹配器把裸 `*` 读作"全部放行"，会让代理彻底失效
+ * The registry uses `;` and often contains forms this library cannot faithfully
+ * translate:
+ *  - `<local>`    — Windows' "local addresses"; loopback is guaranteed by the official library anyway
+ *  - `10.*` etc.  — Windows prefix wildcards; the official matcher only does suffix matching, so these become inert
+ *  - `10.0.0.0/8` — CIDR, explicitly not matched
+ *  - `*`          — **must be dropped**: the official matcher reads a bare `*` as "bypass everything", which would disable the proxy entirely
  *
- * 因此只保留能忠实翻译的条目：普通主机名 / 域名 / `host:port`。
- * @param {string} override 注册表原始值
- * @returns {string[]} 可安全使用的条目
+ * Only faithfully translatable entries are kept: plain hostnames, domains and `host:port`.
+ *
+ * 把 Windows 的 ProxyOverride 转成 NO_PROXY 条目。注册表用 `;` 分隔，且常含本库
+ * 无法忠实翻译的写法（见上）。因此只保留普通主机名 / 域名 / host:port。
+ *
+ * @param {string} override Raw registry value. 注册表原始值。
+ * @returns {string[]} Entries that are safe to use. 可安全使用的条目。
  */
 export function normalizeProxyOverride(override) {
   if (!override) return [];
@@ -256,8 +314,10 @@ export function normalizeProxyOverride(override) {
     .map((entry) => entry.trim())
     .filter((entry) => {
       if (!entry || entry === '<local>' || entry.includes('/') || entry.includes('=')) return false;
+      // A bare `*` is read as "bypass everything" by the official matcher and must be dropped.
       // 裸 `*` 会被官方匹配器读作"全部放行"，必须丢弃。
       if (entry === '*') return false;
+      // A leading `*.` is officially supported (the matcher strips `^\*?\.`); other `*` cannot be translated.
       // 前导 `*.` 是官方支持的写法（匹配器会剥掉 `^\*?\.`）；其余位置的 `*` 无法翻译。
       const rest = entry.startsWith('*.') ? entry.slice(2) : entry;
       return !rest.includes('*');
@@ -265,10 +325,12 @@ export function normalizeProxyOverride(override) {
 }
 
 /**
+ * Probe which local ports have a proxy listening.
  * 探测本机哪些端口有代理在监听。
- * @param {number[]} ports 候选端口
- * @param {number} timeoutMs 每个端口的超时
- * @returns {Promise<number[]>} 有响应的端口
+ *
+ * @param {number[]} ports Candidate ports. 候选端口。
+ * @param {number} timeoutMs Per-port timeout. 每个端口的超时。
+ * @returns {Promise<number[]>} Ports that answered. 有响应的端口。
  */
 export async function probeLocalProxyPorts(ports, timeoutMs) {
   const results = await Promise.all((ports ?? []).map((port) => new Promise((resolve) => {
@@ -287,8 +349,10 @@ export async function probeLocalProxyPorts(ports, timeoutMs) {
 }
 
 /**
+ * Let the official resolver read a plain object.
  * 让官方库的解析器读到一个普通对象。
- * @param {Record<string, string|undefined>} values 变量表
+ *
+ * @param {Record<string, string|undefined>} values Variable table. 变量表。
  * @returns {{get: (name: string) => {value: string}|undefined}} EnvLookup
  */
 function makeEnvLookup(values) {
@@ -300,7 +364,7 @@ function makeEnvLookup(values) {
   };
 }
 
-/** 环境里是否已经有可用的代理配置（启动器或用户已经处理过）。 */
+/** Whether a usable proxy config already exists in the environment (launcher or user handled it). 环境里是否已经有可用的代理配置。 */
 function inheritedProxyEnv() {
   const read = (name) => process.env[name] ?? process.env[name.toUpperCase()];
   const http = read('http_proxy');
@@ -310,9 +374,11 @@ function inheritedProxyEnv() {
 }
 
 /**
+ * Decide which proxy to use, and where it came from.
  * 决定要用哪个代理，以及它的来源。
- * @param {object} config 插件配置
- * @returns {Promise<{url: string|null, source: string|null, noProxy: string, probed: number[]}>} 决策
+ *
+ * @param {object} config Plugin config. 插件配置。
+ * @returns {Promise<{url: string|null, source: string|null, noProxy: string, probed: number[]}>} Decision 决策。
  */
 export async function resolveProxy(config) {
   const base = { url: null, source: null, noProxy: config.noProxy ?? '', probed: [] };
@@ -325,13 +391,15 @@ export async function resolveProxy(config) {
       : { ...base, source: 'manual(未填地址)' };
   }
 
+  // auto: respect an existing configuration rather than fighting it.
   // auto：环境里已经配好就尊重现状，不抢。
   const inherited = inheritedProxyEnv();
   if (inherited.present) {
     return { ...base, url: inherited.https ?? inherited.http ?? inherited.all, source: 'environment' };
   }
 
-  // 1) 系统代理设置 —— 这是本插件唯一**可靠**的检测方式，也是适用条件。
+  // 1) System proxy — the only **reliable** detection, and the plugin's condition of use.
+  // 1) 系统代理设置 —— 本插件唯一可靠的检测方式，也是适用条件。
   const system = await readWindowsSystemProxy();
   if (system.mode === 'pac') {
     return { ...base, source: 'pac-unsupported', pacUrl: system.pacUrl };
@@ -346,6 +414,9 @@ export async function resolveProxy(config) {
     return { ...base, source: 'unparsable', rawServer: system.server };
   }
 
+  // 2) Fallback: probe common local ports. A hit proves some proxy software is
+  //    listening, but it never wrote a system proxy — so we cannot confirm it is
+  //    an HTTP proxy, nor obtain its bypass list.
   // 2) 兜底：探测常见本地端口。命中说明有代理软件在监听，但它没写系统代理，
   //    因此无法确认它是不是 HTTP 代理，也拿不到它的绕过名单。
   const probed = await probeLocalProxyPorts(config.probePorts, config.probeTimeoutMs);
@@ -357,12 +428,17 @@ export async function resolveProxy(config) {
 }
 
 /**
- * 把"没找到代理"翻译成用户能照做的提醒。
+ * Turn "no proxy found" into a message the user can act on.
  *
- * 本插件只适用于**系统代理模式**的加速器，而最常见的失败原因是：
- * 加速器没开、加速器用的是 hosts/TUN 模式，或者先开了 DSH 再开加速器。
- * @param {{source: string, pacUrl?: string|null, rawServer?: string}} decision 决策结果
- * @returns {string} 面向用户的提醒
+ * The plugin only applies to **system-proxy-mode** accelerators, and the most
+ * common failure causes are: the accelerator is off, it runs in hosts/TUN mode,
+ * or DSH was started before the accelerator.
+ *
+ * 把"没找到代理"翻译成用户能照做的提醒。本插件只适用于系统代理模式的加速器，
+ * 而最常见的失败原因是：加速器没开、用的是 hosts/TUN 模式，或先开了 DSH。
+ *
+ * @param {{source: string, pacUrl?: string|null, rawServer?: string}} decision Decision 决策结果。
+ * @returns {string} A user-facing message. 面向用户的提醒。
  */
 export function explainProxyFailure(decision) {
   switch (decision.source) {
@@ -388,9 +464,13 @@ export function explainProxyFailure(decision) {
 let proxyDisposer = null;
 
 /**
+ * Install the proxy at runtime through the official entry point, so the global
+ * dispatcher and proxyRouteFor() both take effect.
+ *
  * 通过官方入口在运行时装配代理，使全局 dispatcher 与 proxyRouteFor() 同时生效。
- * @param {object} config 插件配置
- * @returns {Promise<{ok: boolean, reason?: string}>} 结果
+ *
+ * @param {object} config Plugin config. 插件配置。
+ * @returns {Promise<{ok: boolean, reason?: string}>} Result 结果。
  */
 export async function installProxy(config) {
   const proxy = state.proxy;
@@ -416,6 +496,8 @@ export async function installProxy(config) {
     return { ok: false, reason: proxy.reason };
   }
 
+  // When the environment already carries a proxy, the official launcher has
+  // installed the policy; do not install a second one.
   // 环境里已经有代理时，官方启动器已经装好了策略；不重复安装。
   if (decision.source === 'environment') {
     proxy.url = decision.url;
@@ -431,6 +513,8 @@ export async function installProxy(config) {
     proxy.reason = `无法加载 @deepseek-ai/dsh-http-proxy（${error.code ?? error.message}）`;
     return { ok: false, reason: proxy.reason };
   }
+  // Older DSH versions may not expose this runtime entry point.
+  // The certificate half is independent and unaffected.
   // 老版本 DSH 可能没有这个运行时入口。证书部分与此无关，不受影响。
   if (typeof mod.installProxyFromEnvironment !== 'function') {
     proxy.reason = '当前 DSH 的 @deepseek-ai/dsh-http-proxy 未导出 installProxyFromEnvironment'
@@ -459,13 +543,15 @@ export async function installProxy(config) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 公共
+// Shared 公共
 // ─────────────────────────────────────────────────────────────
 
 /**
+ * Perform one real request after loading, to verify the whole chain.
  * 加载后做一次真实请求，验证整条链路。
- * @param {object} config 插件配置
- * @returns {Promise<object>} 自检结果
+ *
+ * @param {object} config Plugin config. 插件配置。
+ * @returns {Promise<object>} Self-check result. 自检结果。
  */
 export async function runSelfCheck(config) {
   const url = config.selfCheckUrl;
@@ -480,6 +566,10 @@ export async function runSelfCheck(config) {
       error: String(code),
       ms: Date.now() - started,
       url,
+      // Key clarification: the most common cause of a failed self-check is that
+      // the URL is simply outside the accelerator's coverage — the proxy itself
+      // may well be installed. Without saying so, users assume the plugin broke.
+      //
       // 关键澄清：自检失败最常见的原因是"这个地址本来就不在你加速器的覆盖范围内"，
       // 而代理本身可能已经装配成功。不写清楚，用户会以为插件坏了。
       hint: '自检失败不代表插件失效。请先看上面的 proxy.installed 与 proxy.source：'
@@ -491,9 +581,11 @@ export async function runSelfCheck(config) {
 }
 
 /**
+ * Resolve the status file path.
  * 解析状态文件路径。
- * @param {object} config 插件配置
- * @returns {string} 绝对路径
+ *
+ * @param {object} config Plugin config. 插件配置。
+ * @returns {string} Absolute path. 绝对路径。
  */
 export function statusFilePath(config) {
   if (config.statusFile) return config.statusFile;
@@ -502,13 +594,18 @@ export function statusFilePath(config) {
 }
 
 /**
+ * Persist the current state. A write failure is not a plugin failure — it only
+ * means one fewer piece of evidence.
+ *
  * 把当前状态落盘。写失败不算插件失败，只是少一份凭据。
- * @param {object} config 插件配置
- * @returns {string|null} 实际写入的路径，失败为 null
+ *
+ * @param {object} config Plugin config. 插件配置。
+ * @returns {string|null} The path actually written, or null. 实际写入的路径，失败为 null。
  */
 export function writeStatus(config) {
   try {
     const file = statusFilePath(config);
+    // Record the path before serialising, otherwise the written copy always has statusFile: null.
     // 先记录路径再序列化，否则落盘的那一份里 statusFile 永远是 null。
     state.statusFile = file;
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -527,14 +624,18 @@ export function writeStatus(config) {
 }
 
 /**
+ * Plugin entry point: takes effect on load.
  * 插件入口：加载即生效。
- * @param {import('@deepseek-ai/cordis').Context} ctx Cordis 上下文
- * @param {object} config 插件配置
+ *
+ * @param {import('@deepseek-ai/cordis').Context} ctx Cordis context. Cordis 上下文。
+ * @param {object} config Plugin config. 插件配置。
  */
 export function apply(ctx, config) {
   const log = (level, message) => ctx.logger?.[level]?.(`[system-net] ${message}`);
   let watchTimer = null;
 
+  // Clean up on unload: restore the proxy policy and stop the retry timer.
+  // (Certificates need no restore: they live only in this process's memory.)
   // 卸载时收尾：还原代理策略、停掉重试计时器。
   // （证书无需还原：它只存在于本进程内存里，进程退出即消失。）
   ctx.effect?.(() => () => {
@@ -545,6 +646,8 @@ export function apply(ctx, config) {
   });
 
   void (async () => {
+    // Install the proxy first: the certificate self-check goes through it, and
+    // the reverse order would produce a false negative.
     // 代理先装：证书自检要走代理，顺序反了会误报。
     const proxyResult = await installProxy(config);
     if (proxyResult.ok) {
@@ -553,6 +656,9 @@ export function apply(ctx, config) {
       if (state.proxy.reason) log('warn', state.proxy.reason);
     } else {
       log('warn', `代理未装配：${proxyResult.reason}`);
+      // Common case: DSH was started first and the accelerator turned on later,
+      // so no system proxy was readable at startup. Retry on an interval until
+      // it installs, then stop.
       // 常见情形：先启动了 DSH，之后才打开加速器——启动时读不到系统代理。
       // 因此在未装配成功时按间隔重试，装配成功即停。
       if (config.proxyMode === 'auto' && config.watchProxy) {
