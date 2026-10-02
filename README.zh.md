@@ -27,7 +27,7 @@
 
 ## 安装
 
-> **尚未发布到 npm**，请用 GitHub 源安装。
+> 本插件通过 **GitHub 分发**（暂未发布到 npm），所以下面这条命令带 `github:` 前缀。
 
 ```sh
 dsh plugin --profile web add github:chickmat/dsh-system-net
@@ -50,7 +50,6 @@ npx -y @deepseek-ai/dsh plugin --profile web add github:chickmat/dsh-system-net
 >
 > 版本不符时插件**不会崩**——它会把具体原因写进状态文件，并告诉你该改用哪种官方做法。
 
-<sub>发布到 npm 后会补上更短的那条命令：`dsh plugin --profile web add dsh-system-net`。</sub>
 
 ### 卸载
 

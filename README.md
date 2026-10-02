@@ -27,7 +27,7 @@
 
 ## Install
 
-> **Not yet published to npm** — install from GitHub:
+> This plugin is distributed **through GitHub** (not yet published to npm), which is why the command below carries the `github:` prefix.
 
 ```sh
 dsh plugin --profile web add github:chickmat/dsh-system-net
@@ -50,7 +50,6 @@ This plugin is **plain JavaScript with zero build step**, so the GitHub path wor
 >
 > On an unsupported version the plugin **does not crash** — it records the exact reason in the status file and tells you which official remedy to use instead.
 
-<sub>Once published to npm, the shorter `dsh plugin --profile web add dsh-system-net` will be added here.</sub>
 
 ### Uninstall
 
