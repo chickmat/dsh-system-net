@@ -1,0 +1,4 @@
+- insert:
+    - id: system-net
+      name: dsh-system-net
+      config: {}
