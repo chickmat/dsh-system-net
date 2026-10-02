@@ -3,3 +3,10 @@ node_modules/
 system-net-status.json
 system-ca-status.json
 .DS_Store
+
+# Local notes and handover documents — never publish these.
+# 本地笔记与交接文档 —— 绝不进仓库。
+交接*
+HANDOVER*
+*.local.md
+NOTES*
