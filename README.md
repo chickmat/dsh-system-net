@@ -178,6 +178,7 @@ Override in your profile's `cordis.patch.yml`:
 | `includeSystem` | `true` | merge the operating system certificate store |
 | `includeDefault` | `true` | keep Node's bundled Mozilla root set (**recommended**) |
 | `extraCaFiles` | `[]` | extra PEM files to trust |
+| `propagateToChildren` | `true` | extend the same trust to **Node child processes** spawned later (appends `--use-system-ca` to `NODE_OPTIONS`). Only applies where Node allows that flag — see below |
 
 ### Shared
 
@@ -203,7 +204,8 @@ On an unsupported Node version the plugin **does not crash**: it records a clear
 
 - **It is not TUN mode.** If your proxy software offers TUN (virtual adapter) mode, enabling that solves both barriers and you do not need this plugin. It exists for system-proxy-only accelerators such as Watt Toolkit / Steam++.
 - **It modifies no configuration files.** It does not write `~/.dsh/.env`, touch the registry, or change system environment variables. Every change lives in the current process's memory and disappears when the process exits.
-- **It does not fix certificates for child processes.** `git` and `curl` run by the agent have their own certificate logic. The proxy environment variables, however, **are** inherited by children.
+- **Certificates for child processes: Node children inherit, git/curl do not.** The plugin appends `--use-system-ca` to `NODE_OPTIONS`, so **Node** children spawned afterwards (the pnpm behind `dsh plugin add`, HTTP MCP servers, …) receive the same trust. `git` and `curl` have their own certificate logic and are unaffected. Proxy environment variables, by contrast, **are** inherited by every child.
+  > That flag only exists from Node **v23.8.0** and was never backported to 22.x. On Node 22.x the plugin **skips** this step and records why in the status file's `cert.childEnvReason` (such children need their own certificate environment variable).
 - **It does not fix the proxy itself.** If the accelerator is off, the port is wrong, or the proxy does not support the site you want, this plugin cannot help.
 
 ## Security notes

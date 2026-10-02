@@ -62,7 +62,7 @@ const DEFAULT_PROBE_PORTS = [7890, 7897, 10808, 10809, 1080, 2080, 8888, 8080, 2
 
 /** Observable state left by the plugin, for self-check and diagnosis. 插件加载后留下的可观测状态。 */
 export const state = {
-  cert: { installed: false, reason: null, defaultCount: null, systemCount: null, mergedCount: null, extraCount: null },
+  cert: { installed: false, reason: null, defaultCount: null, systemCount: null, mergedCount: null, extraCount: null, childEnv: null, childEnvReason: null },
   proxy: { installed: false, reason: null, mode: null, url: null, source: null, noProxy: null, probed: [] },
   selfCheck: null,
   statusFile: null,
@@ -109,6 +109,16 @@ export const Config = Schema.object({
   includeDefault: Schema.boolean().default(true),
   /** Extra PEM files to trust. 额外要信任的 PEM 文件路径。 */
   extraCaFiles: Schema.array(Schema.string()).default([]),
+  /**
+   * Extend the same trust to Node child processes spawned later, by appending
+   * `--use-system-ca` to NODE_OPTIONS. Only applies where Node permits that flag
+   * inside NODE_OPTIONS (23.8+/24+); elsewhere it is skipped and reported.
+   *
+   * 让之后派生的 Node 子进程也获得同样的信任：往 NODE_OPTIONS 追加
+   * `--use-system-ca`。仅在 Node 允许该 flag 出现在 NODE_OPTIONS 时生效
+   * （23.8+/24+）；否则跳过，并在状态里说明原因。
+   */
+  propagateToChildren: Schema.boolean().default(true),
 
   // ---- Shared 公共 ----
   /**
@@ -219,6 +229,95 @@ export async function installTrust(config) {
   cert.installed = true;
   cert.reason = failed.length ? `部分额外证书读取失败: ${failed.join('; ')}` : null;
   return { ok: true, reason: cert.reason ?? undefined };
+}
+
+/** The flag appended to NODE_OPTIONS so child Node processes read the OS store. 追加进 NODE_OPTIONS 的 flag。 */
+const CHILD_TRUST_FLAG = '--use-system-ca';
+
+/**
+ * Ensure one flag is present in a NODE_OPTIONS string, without duplicating it.
+ * 确保 NODE_OPTIONS 字符串里含有某个 flag，已存在则不重复追加。
+ *
+ * @param {string} current Existing value. 现有值。
+ * @param {string} flag Flag to ensure. 要确保存在的 flag。
+ * @returns {string} Resulting value. 结果值。
+ */
+export function withNodeOption(current, flag) {
+  const text = String(current ?? '').trim();
+  const parts = text ? text.split(/\s+/) : [];
+  if (parts.includes(flag)) return text;
+  return parts.length ? `${text} ${flag}` : flag;
+}
+
+/**
+ * Whether this Node permits `--use-system-ca` inside NODE_OPTIONS.
+ *
+ * Not every Node we support does: the flag landed in v23.8.0 with no 22.x
+ * backport, so writing it into NODE_OPTIONS on Node 22.19/22.20 would make every
+ * child Node process die on startup. So ask Node itself rather than guess.
+ *
+ * 本机 Node 是否允许把 `--use-system-ca` 放进 NODE_OPTIONS。
+ * 该 flag 自 v23.8.0 才有、未回移植到 22.x；在 22.19/22.20 上写进去会让子进程
+ * 启动即失败。所以问 Node 自己，而不是按版本号猜。
+ *
+ * @returns {boolean} True when allowed. 允许时为 true。
+ */
+export function childFlagAllowed() {
+  const flags = process.allowedNodeEnvironmentFlags;
+  return typeof flags?.has === 'function' && flags.has(CHILD_TRUST_FLAG);
+}
+
+let originalNodeOptions;   // remembered so dispose can restore it 记住原值以便卸载时复原
+
+/**
+ * Let Node child processes spawned later trust the same certificate store.
+ *
+ * This only edits `process.env`, which a child inherits at spawn time: it cannot
+ * reach a process that already exists, and non-Node children (git, curl) have
+ * their own certificate logic and are unaffected.
+ *
+ * 让之后派生的 Node 子进程获得同样的证书信任。
+ * 只改 `process.env`（子进程在派生时继承），因此对已存在的进程无效；
+ * 非 Node 子进程（git/curl）有自己的证书逻辑，不受影响。
+ *
+ * @param {object} config Plugin config. 插件配置。
+ * @returns {boolean} Whether the environment was changed. 是否改动了环境。
+ */
+export function propagateTrustToChildren(config) {
+  const cert = state.cert;
+  if (!config.propagateToChildren) {
+    cert.childEnvReason = 'disabled by config';
+    return false;
+  }
+  if (!cert.installed) {
+    cert.childEnvReason = '证书未生效，跳过';
+    return false;
+  }
+  if (!childFlagAllowed()) {
+    cert.childEnvReason = `Node ${process.version} 不允许在 NODE_OPTIONS 中使用 ${CHILD_TRUST_FLAG}`
+      + '（该 flag 自 v23.8.0 才有，未回移植到 22.x）；子进程需自行设置证书环境变量';
+    return false;
+  }
+  if (originalNodeOptions === undefined) originalNodeOptions = process.env.NODE_OPTIONS ?? null;
+  process.env.NODE_OPTIONS = withNodeOption(process.env.NODE_OPTIONS, CHILD_TRUST_FLAG);
+  cert.childEnv = process.env.NODE_OPTIONS;
+  cert.childEnvReason = null;
+  return true;
+}
+
+/**
+ * Undo {@link propagateTrustToChildren}.
+ * 撤销 {@link propagateTrustToChildren} 对 NODE_OPTIONS 的改动。
+ *
+ * @returns {boolean} Whether anything was restored. 是否复原了。
+ */
+export function restoreChildEnv() {
+  if (originalNodeOptions === undefined) return false;
+  if (originalNodeOptions === null) delete process.env.NODE_OPTIONS;
+  else process.env.NODE_OPTIONS = originalNodeOptions;
+  originalNodeOptions = undefined;
+  state.cert.childEnv = null;
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -644,6 +743,7 @@ export function apply(ctx, config) {
     watchTimer = null;
     void proxyDisposer?.();
     proxyDisposer = null;
+    restoreChildEnv();
   });
 
   void (async () => {
@@ -682,6 +782,13 @@ export function apply(ctx, config) {
       const { systemCount, defaultCount, extraCount, mergedCount } = state.cert;
       log('info', `已信任系统证书库：+${systemCount} 系统 / ${defaultCount} 内置 / ${extraCount} 额外 → 共 ${mergedCount} 张`);
       if (state.cert.reason) log('warn', state.cert.reason);
+      // Child Node processes spawned from here on inherit the trust too.
+      // 此后派生的 Node 子进程也会继承这份信任。
+      if (propagateTrustToChildren(config)) {
+        log('info', `子进程证书信任已接力：NODE_OPTIONS=${state.cert.childEnv}`);
+      } else {
+        log('warn', `子进程证书信任未接力：${state.cert.childEnvReason}`);
+      }
     } else {
       log('warn', `证书未生效：${certResult.reason}`);
     }

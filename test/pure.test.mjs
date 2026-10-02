@@ -144,6 +144,43 @@ test('非法 proxyMode 会被 schema 拒绝 / an invalid proxyMode is rejected b
   assert.throws(() => mod.Config({ proxyMode: 'whatever' }));
 });
 
+// ── 子进程证书接力 / child-process trust hand-off ───────────────
+test('withNodeOption 追加 flag / appends the flag', () => {
+  assert.equal(mod.withNodeOption('', '--use-system-ca'), '--use-system-ca');
+  assert.equal(mod.withNodeOption(undefined, '--use-system-ca'), '--use-system-ca');
+  assert.equal(mod.withNodeOption('--max-old-space-size=4096', '--use-system-ca'), '--max-old-space-size=4096 --use-system-ca');
+});
+
+test('withNodeOption 不重复追加 / never duplicates the flag', () => {
+  assert.equal(mod.withNodeOption('--use-system-ca', '--use-system-ca'), '--use-system-ca');
+  assert.equal(mod.withNodeOption('--a --use-system-ca', '--use-system-ca'), '--a --use-system-ca');
+  assert.equal(mod.withNodeOption('  --use-system-ca  ', '--use-system-ca'), '--use-system-ca');
+});
+
+test('childFlagAllowed 返回布尔 / returns a boolean', () => {
+  assert.equal(typeof mod.childFlagAllowed(), 'boolean');
+});
+
+test('证书未生效时不改环境 / does nothing when trust is not installed', () => {
+  const saved = process.env.NODE_OPTIONS;
+  mod.state.cert.installed = false;
+  const changed = mod.propagateTrustToChildren(mod.Config({}));
+  assert.equal(changed, false);
+  assert.equal(process.env.NODE_OPTIONS, saved);
+  assert.ok(mod.state.cert.childEnvReason);
+});
+
+test('受配置开关约束 / honours the config switch', () => {
+  mod.state.cert.installed = true;
+  const changed = mod.propagateTrustToChildren(mod.Config({ propagateToChildren: false }));
+  assert.equal(changed, false);
+  assert.equal(mod.state.cert.childEnvReason, 'disabled by config');
+});
+
+test('restoreChildEnv 在未改动时安全返回 / is safe when nothing was changed', () => {
+  assert.equal(typeof mod.restoreChildEnv(), 'boolean');
+});
+
 // ── 运行 / run ─────────────────────────────────────────────────
 let failed = 0;
 for (const [name, fn] of cases) {

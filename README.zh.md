@@ -176,6 +176,7 @@ installGlobalProxy(policy) {
 | `includeSystem` | `true` | 并入操作系统证书库 |
 | `includeDefault` | `true` | 保留 Node 自带的 Mozilla 根证书集（**建议保持开启**） |
 | `extraCaFiles` | `[]` | 额外信任的 PEM 文件路径 |
+| `propagateToChildren` | `true` | 让之后派生的 **Node 子进程**也获得同样的信任（往 `NODE_OPTIONS` 追加 `--use-system-ca`）。仅在 Node 允许该 flag 时生效，见下 |
 
 ### 公共
 
@@ -201,7 +202,8 @@ Node 版本不符时插件**不会崩**：它会把明确原因写进状态文�
 
 - **不使用 TUN 模式**。如果你的代理软件有 TUN（虚拟网卡）模式，开它即可同时解决两道关卡，不需要本插件。Watt Toolkit / Steam++ 这类只有系统代理的加速器才用得着。
 - **不修改任何配置文件**。不写 `~/.dsh/.env`、不改注册表、不改系统环境变量。所有改动都在当前进程内存里，进程退出即消失。
-- **不影响子进程的证书**。agent 在 shell 里跑的 `git`、`curl` 有自己的证书逻辑，本插件管不到。但代理环境变量**会**被子进程继承。
+- **子进程的证书：Node 会继承，git/curl 不会。** 插件会往 `NODE_OPTIONS` 追加 `--use-system-ca`，因此**之后派生**的 Node 子进程（`dsh plugin add` 用的 pnpm、HTTP MCP 服务器……）也获得同样的信任；`git`、`curl` 有自己的证书逻辑，不受影响。代理环境变量则**所有**子进程都会继承。
+  > 该 flag 自 Node **v23.8.0** 才有、未回移植到 22.x。在 Node 22.x 上插件会**跳过**这一步并在状态文件的 `cert.childEnvReason` 里说明（这类子进程需自行设置证书环境变量）。
 - **不解决代理本身的问题**。如果加速器没开、端口填错、或代理软件不支持你要访问的站点，本插件无能为力。
 
 ## 安全说明
