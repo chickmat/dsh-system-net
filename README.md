@@ -27,28 +27,30 @@
 
 ## Install
 
-```sh
-dsh plugin --profile web add dsh-system-net
-```
-
-Without a global `dsh` command:
-
-```sh
-npx -y @deepseek-ai/dsh plugin --profile web add dsh-system-net
-```
-
-**Restart DSH once.** The plugin applies at load time; every later launch re-detects and re-installs automatically, so there is **no ongoing maintenance**.
-
-> **Requirements**: Node **22.19+ or 24.5+**, DSH **0.2.0-rc.2+**.
-> On an unsupported version the plugin **does not crash** — it records the exact reason in the status file and tells you which official remedy to use instead.
-
-### Install straight from GitHub
+> **Not yet published to npm** — install from GitHub:
 
 ```sh
 dsh plugin --profile web add github:chickmat/dsh-system-net
 ```
 
-This plugin is **plain JavaScript with zero build step**, so that path works as-is — there is no `prepare` script to authorize (which would mean **letting the package's code run on your machine**).
+Without a global `dsh` command:
+
+```sh
+npx -y @deepseek-ai/dsh plugin --profile web add github:chickmat/dsh-system-net
+```
+
+**Restart DSH once.** The plugin applies at load time; every later launch re-detects and re-installs automatically, so there is **no ongoing maintenance**.
+
+This plugin is **plain JavaScript with zero build step**, so the GitHub path works as-is — there is no `prepare` script to authorize (which would mean **letting the package's code run on your machine**).
+
+> **Requirements**
+> - DSH **0.2.0-rc.2+**
+> - Node **22.19+ or 24.5+** (**23.x is not supported**: it has `getCACertificates` but lacks the `setDefaultCACertificates` this plugin needs)
+> - `@deepseek-ai/cordis`, `@deepseek-ai/schemastery` and `@deepseek-ai/dsh-http-proxy` **are supplied by your DSH runtime** — you never install them yourself
+>
+> On an unsupported version the plugin **does not crash** — it records the exact reason in the status file and tells you which official remedy to use instead.
+
+<sub>Once published to npm, the shorter `dsh plugin --profile web add dsh-system-net` will be added here.</sub>
 
 ### Uninstall
 
@@ -88,13 +90,20 @@ The plugin writes `$DSH_HOME/system-net-status.json` (default `~/.dsh/system-net
 
 - `proxy.source` — where the proxy came from: `system-proxy` / `port-probe` / `environment` (already configured, plugin stayed out of the way) / `manual` / `not-found`
 - `cert.systemCount` — how many certificates were read from the OS store (`0` means unsupported platform or empty store)
-- `selfCheck` — one real request at load. **The strongest signal: a 200 here means the whole chain genuinely works**
+- `selfCheck` — one real request at load. A 200 here means the whole chain genuinely works
+
+> ⚠️ **A failed self-check does not mean the plugin failed.** The most common cause is that **the self-check URL is simply outside your accelerator's coverage** — e.g. your accelerator covers Steam only, while the default self-check hits GitHub.
+>
+> **To tell whether the proxy is live, read `proxy.installed`, not `selfCheck`.** If `installed: true` but the self-check failed, the proxy is installed and only that one URL is unreachable. Point `selfCheckUrl` at something you know is covered, or set `selfCheck: false`.
+> When the self-check fails the plugin writes this same note into the status file's `selfCheck.hint`.
 
 That run happened with a **fresh `DSH_HOME`, no `.env`, and no proxy or certificate environment variables** — a "new machine". `source` being `system-proxy` rather than `environment` means the plugin read the proxy out of the Windows registry itself.
 
 ## Requirements (read this first)
 
 **This plugin only applies to accelerators running in "system proxy" mode** — the kind that writes a proxy address into Windows *Internet Options → Connections → LAN settings*.
+
+> **A note on the word "accelerator" (加速器).** Throughout this README it means a *network-boosting tool* — Watt Toolkit, Steam++, dev-sidecar and the like — **not** a hardware accelerator. The rest of this document also calls them "proxy tools" where that reads more clearly.
 
 | Acceleration method | Examples | This plugin |
 |---|---|---|
@@ -178,20 +187,18 @@ Override in your profile's `cordis.patch.yml`:
 | `enabled` | `true` | master switch |
 | `statusFile` | `''` | status file path; empty means `$DSH_HOME/system-net-status.json` |
 | `selfCheck` | `true` | perform one real request after loading |
-| `selfCheckUrl` | GitHub API | self-check target |
+| `selfCheckUrl` | GitHub API | self-check target. **If your accelerator does not cover GitHub, change this** to something it does cover — otherwise the self-check fails (which does *not* mean the plugin failed; read `proxy.installed`) |
 | `selfCheckTimeoutMs` | `15000` | self-check timeout |
 
 ## Compatibility
 
 | Item | Requirement |
 |---|---|
-| Node | **22.19+ or 24.5+** (when `tls.setDefaultCACertificates` was introduced) |
+| Node | **22.19+ or 24.5+** (**23.x is not supported**). `tls.setDefaultCACertificates` landed in v22.19.0 / v24.5.0; 23.x has `getCACertificates` but not it |
 | DSH | 0.2.0-rc.2 (verified) |
 | Platform | automatic proxy detection (reading the system proxy) is **Windows only**; other platforms can use `manual`. Certificate handling works everywhere |
 
 On an unsupported Node version the plugin **does not crash**: it records a clear reason in the status file and points you at `NODE_EXTRA_CA_CERTS`.
-
-> Note: Node 23.x is **not** supported — it has `getCACertificates` (23.10+) but not `setDefaultCACertificates`.
 
 ## What it does not do
 

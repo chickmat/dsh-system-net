@@ -475,7 +475,17 @@ export async function runSelfCheck(config) {
     state.selfCheck = { ok: response.ok, status: response.status, ms: Date.now() - started, url };
   } catch (error) {
     const code = error?.cause?.code ?? error?.code ?? error?.name ?? 'unknown';
-    state.selfCheck = { ok: false, error: String(code), ms: Date.now() - started, url };
+    state.selfCheck = {
+      ok: false,
+      error: String(code),
+      ms: Date.now() - started,
+      url,
+      // 关键澄清：自检失败最常见的原因是"这个地址本来就不在你加速器的覆盖范围内"，
+      // 而代理本身可能已经装配成功。不写清楚，用户会以为插件坏了。
+      hint: '自检失败不代表插件失效。请先看上面的 proxy.installed 与 proxy.source：'
+        + '若已装配，说明代理已生效，只是这个自检地址不在你加速器的覆盖范围内。'
+        + '可把 selfCheckUrl 换成你确定被覆盖的地址，或设 selfCheck: false。',
+    };
   }
   return state.selfCheck;
 }
@@ -572,7 +582,10 @@ export function apply(ctx, config) {
     if (config.selfCheck) {
       const check = await runSelfCheck(config);
       if (check.ok) log('info', `自检通过：${check.url} → HTTP ${check.status} (${check.ms}ms)`);
-      else log('warn', `自检未通过：${check.url} → ${check.error ?? `HTTP ${check.status}`} (${check.ms}ms)`);
+      else {
+        log('warn', `自检未通过：${check.url} → ${check.error ?? `HTTP ${check.status}`} (${check.ms}ms)`
+          + '；这不代表插件失效——请先看状态文件里的 proxy.installed 与 proxy.source');
+      }
     }
 
     state.statusFile = writeStatus(config);

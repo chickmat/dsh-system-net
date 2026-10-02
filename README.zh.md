@@ -27,28 +27,30 @@
 
 ## 安装
 
-```sh
-dsh plugin --profile web add dsh-system-net
-```
-
-没有全局 `dsh` 命令的话：
-
-```sh
-npx -y @deepseek-ai/dsh plugin --profile web add dsh-system-net
-```
-
-装完**重启一次 DSH**。插件在加载时生效；此后每次启动都会自动重新检测，**不需要任何后续维护**。
-
-> **要求**：Node **22.19+ 或 24.5+**，DSH **0.2.0-rc.2+**。
-> 版本不符时插件**不会崩**——它会把具体原因写进状态文件，并告诉你该改用哪种官方做法。
-
-### 从 GitHub 直接安装
+> **尚未发布到 npm**，请用 GitHub 源安装。
 
 ```sh
 dsh plugin --profile web add github:chickmat/dsh-system-net
 ```
 
-本插件是**纯 JavaScript、零构建步骤**，所以这条路可以直接用——不需要给 pnpm 授权运行 `prepare` 构建脚本（那等于**允许这个包的代码在你机器上执行**）。
+没有全局 `dsh` 命令的话：
+
+```sh
+npx -y @deepseek-ai/dsh plugin --profile web add github:chickmat/dsh-system-net
+```
+
+装完**重启一次 DSH**。插件在加载时生效；此后每次启动都会自动重新检测，**不需要任何后续维护**。
+
+本插件是**纯 JavaScript、零构建步骤**，所以 GitHub 安装可以直接用——**不需要**给 pnpm 授权运行 `prepare` 构建脚本（那等于**允许这个包的代码在你机器上执行**）。
+
+> **要求**
+> - DSH **0.2.0-rc.2+**
+> - Node **22.19+ 或 24.5+**（**暂不支持 23.x**：它有 `getCACertificates`，但缺少本插件需要的 `setDefaultCACertificates`）
+> - `@deepseek-ai/cordis`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-http-proxy` 三个依赖**由你的 DSH 运行时提供**，你不需要单独安装它们
+>
+> 版本不符时插件**不会崩**——它会把具体原因写进状态文件，并告诉你该改用哪种官方做法。
+
+<sub>发布到 npm 后会补上更短的那条命令：`dsh plugin --profile web add dsh-system-net`。</sub>
 
 ### 卸载
 
@@ -88,7 +90,12 @@ dsh plugin --profile web remove dsh-system-net
 
 - `proxy.source` —— 代理从哪来：`system-proxy`（读系统设置）/ `port-probe`（探测端口）/ `environment`（环境已配好，插件未介入）/ `manual` / `not-found`
 - `cert.systemCount` —— 从系统证书库读到多少张（`0` 说明平台不支持或库为空）
-- `selfCheck` —— 加载时做的一次真实请求。**最有说服力的一项：它是 200，说明整条链路真的通了**
+- `selfCheck` —— 加载时做的一次真实请求。它是 200，说明整条链路真的通了
+
+> ⚠️ **自检失败 ≠ 插件失效。** 最常见的原因是**这个自检地址本来就不在你加速器的覆盖范围内**——例如你的加速器只覆盖 Steam，而默认自检打的是 GitHub。
+>
+> **判断代理是否生效，看 `proxy.installed`，不是看 `selfCheck`。** 若 `installed: true` 而自检失败，说明代理已经装配上了，只是那个地址不通。此时把 `selfCheckUrl` 换成你确定被覆盖的地址，或设 `selfCheck: false` 即可。
+> 插件在自检失败时会把这段提醒一并写进状态文件的 `selfCheck.hint` 字段。
 
 上图那次运行的环境是：**全新的 `DSH_HOME`、没有 `.env`、没有任何代理或证书环境变量**——也就是一台"新机器"。`source` 是 `system-proxy` 而不是 `environment`，说明代理是插件自己从 Windows 注册表读出来的。
 
@@ -178,20 +185,18 @@ installGlobalProxy(policy) {
 | `enabled` | `true` | 总开关 |
 | `statusFile` | `''` | 状态文件位置；空表示 `$DSH_HOME/system-net-status.json` |
 | `selfCheck` | `true` | 加载后做一次真实请求 |
-| `selfCheckUrl` | GitHub API | 自检目标 |
+| `selfCheckUrl` | GitHub API | 自检目标。**若你的加速器不覆盖 GitHub，请换成你确定被覆盖的地址**，否则自检会失败（但那不代表插件失效——看 `proxy.installed`） |
 | `selfCheckTimeoutMs` | `15000` | 自检超时 |
 
 ## 兼容性
 
 | 项目 | 要求 |
 |---|---|
-| Node | **22.19+ 或 24.5+**（`tls.setDefaultCACertificates` 的引入版本） |
+| Node | **22.19+ 或 24.5+**（**不支持 23.x**）。`tls.setDefaultCACertificates` 的引入版本是 v22.19.0 / v24.5.0；23.x 有 `getCACertificates` 却没有它 |
 | DSH | 0.2.0-rc.2（实测通过） |
 | 平台 | 代理自动检测（读系统代理）**仅 Windows**；其他平台可用 `manual` 模式。证书部分全平台 |
 
 Node 版本不符时插件**不会崩**：它会把明确原因写进状态文件，并提示改用 `NODE_EXTRA_CA_CERTS`。
-
-> 注：Node 23.x **不在**支持范围内——它有 `getCACertificates`（23.10+）但没有 `setDefaultCACertificates`。
 
 ## 它不做的事
 
