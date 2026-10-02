@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /**
  * dsh-system-net — make DeepSeek Harness follow your system network settings
  * (proxy + certificates).
